@@ -1,28 +1,16 @@
-# ==============================================================================
-# المشروع: بوت RMOT الصوتي - الإصدار الرابع (Modal & Admin System)
-# الوصف: لوحة تحكم إدارية بنظام النوافذ المنبثقة لإرسال التحذيرات والإعلانات في الخاص
-# المميزات: صوت 24/7، منشن إدارة، نوافذ إدخال بيانات، إرسال تلقائي للخاص
-# ==============================================================================
-
 import discord
-from discord.ext import commands, tasks
-from discord.ui import Button, View, Modal, TextInput
-import asyncio
+from discord.ext import commands
+from discord import app_commands
 import os
-import datetime
-from dotenv import load_dotenv
+import time
+import json
+import asyncio
+import traceback
 
-load_dotenv()
 TOKEN = os.getenv("TOKEN")
+LOGIN_CHANNEL = 1473015218211651706
 
-# ------------------------------------------------------------------------------
-# [1] إعدادات الربط والتشغيل (Configuration)
-# ------------------------------------------------------------------------------
-VOICE_ID = 1466581684290850984
-STAFF_CHANNEL_ID = 1467779526351392880
-STAFF_ROLE_ID = 1466572944166883461
-AUDIO_FILE = "support.mp3"
-PANEL_IMAGE = "POT.png"
+ADMIN_ROLE = 1473015044643094643
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -30,147 +18,212 @@ intents.voice_states = True
 intents.guilds = True
 intents.members = True
 
-bot = commands.Bot(command_prefix='!', intents=intents, help_command=None)
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-# ------------------------------------------------------------------------------
-# [2] نوافذ إدخال البيانات (Modals System)
-# ------------------------------------------------------------------------------
+sessions = {}
+points = {}
+leave_timers = {}
 
-class WarningModal(Modal, title="إصدار تحذير رسمي"):
-    user_id = TextInput(label="آيدي العضو المعني", placeholder="أدخل ID العضو هنا...", min_length=15)
-    reason = TextInput(label="سبب التحذير", style=discord.TextStyle.paragraph, placeholder="اكتب السبب بوضوح...")
+# تحميل النقاط
+if os.path.exists("points.json"):
+    with open("points.json", "r") as f:
+        points = json.load(f)
 
-    async def on_submit(self, interaction: discord.Interaction):
-        try:
-            user = await bot.fetch_user(int(self.user_id.value))
-            embed = discord.Embed(title="⚠️ تحذير رسمي من الإدارة", description=f"تم إصدار تحذير بحقك بسبب:\n**{self.reason.value}**", color=0xff0000)
-            await user.send(embed=embed)
-            await interaction.response.send_message(f"✅ تم إرسال التحذير للعضو {user.name} في الخاص.", ephemeral=True)
-        except:
-            await interaction.response.send_message("❌ فشل الإرسال! تأكد من الآيدي أو أن العضو مغلق الخاص.", ephemeral=True)
+def save_points():
+    with open("points.json", "w") as f:
+        json.dump(points, f)
 
-class AnnouncementModal(Modal, title="نشر إعلان رتبة"):
-    role_id = TextInput(label="آيدي الرتبة المستهدفة", placeholder="أدخل ID الرتبة هنا...", min_length=15)
-    message = TextInput(label="نص الإعلان", style=discord.TextStyle.paragraph, placeholder="اكتب الإعلان الذي سيصلهم في الخاص...")
+def format_time(seconds):
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h:02}:{m:02}:{s:02}"
 
-    async def on_submit(self, interaction: discord.Interaction):
-        await interaction.response.send_message("⏳ جاري البدء في عملية النشر التلقائي للرتبة...", ephemeral=True)
-        role = interaction.guild.get_role(int(self.role_id.value))
-        if not role:
-            return await interaction.followup.send("❌ آيدي الرتبة غير صحيح!", ephemeral=True)
-
-        count = 0
-        for member in role.members:
-            try:
-                embed = discord.Embed(title="📢 إعلان هام", description=self.message.value, color=0x00ff00)
-                await member.send(embed=embed)
-                count += 1
-            except:
-                continue
-        await interaction.followup.send(f"✅ تم الانتهاء! وصل الإعلان لـ {count} عضو في الخاص.", ephemeral=True)
-
-# ------------------------------------------------------------------------------
-# [3] لوحة التحكم RMOT (الأزرار والتحكم)
-# ------------------------------------------------------------------------------
-
-class ControlPanel(View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(label="إعلان 📢", style=discord.ButtonStyle.green, custom_id="m_ann")
-    async def announcement(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AnnouncementModal())
-
-    @discord.ui.button(label="تحذير ⚠️", style=discord.ButtonStyle.red, custom_id="m_warn")
-    async def warning(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(WarningModal())
-
-    @discord.ui.button(label="طرد 👢", style=discord.ButtonStyle.red, custom_id="m_kick")
-    async def kick(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("👢 نظام الطرد اليدوي: يرجى استخدام الأمر الإداري المباشر.", ephemeral=True)
-
-    @discord.ui.button(label="تنبيه 🔔", style=discord.ButtonStyle.blurple, custom_id="m_alert")
-    async def alert(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🔔 تم تفعيل نظام التنبيهات السريع.", ephemeral=True)
-
-    @discord.ui.button(label="رتبة 🏅", style=discord.ButtonStyle.grey, custom_id="m_role")
-    async def role(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🏅 يرجى الانتظار في الروم الصوتي ليتم تسليمك الرتبة.", ephemeral=True)
-
-    @discord.ui.button(label="معلومات ℹ️", style=discord.ButtonStyle.blurple, custom_id="m_info")
-    async def info(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("ℹ️ RMOT V4: نظام التحكم الصوتي والإداري المتكامل.", ephemeral=True)
-
-    @discord.ui.button(label="إعادة اتصال صوتي 🔄", style=discord.ButtonStyle.blurple, custom_id="m_recon")
-    async def reconnect(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message("🔄 جاري تحديث اتصال البوت الصوتي...", ephemeral=True)
-
-# ------------------------------------------------------------------------------
-# [4] نظام الصوت والبقاء 24/7
-# ------------------------------------------------------------------------------
+# صلاحيات
+def is_admin(member):
+    return any(role.id == ADMIN_ROLE for role in member.roles)
 
 @bot.event
 async def on_ready():
-    print("✅ نظام RMOT V4 متصل وجاهز للعمل!")
-    stay_in_voice.start()
+    print(f"Bot Online: {bot.user}")
+    await bot.tree.sync()
 
-@tasks.loop(seconds=15)
-async def stay_in_voice():
-    channel = bot.get_channel(VOICE_ID)
-    if not channel:
-        return
-    vc = discord.utils.get(bot.voice_clients, guild=channel.guild)
-    if not vc or not vc.is_connected():
-        try:
-            await channel.connect(reconnect=True)
-        except:
-            pass
+# ======================
+# Slash Commands
+# ======================
+
+@bot.tree.command(name="نقاط")
+@app_commands.describe(member="العضو")
+async def points_command(interaction: discord.Interaction, member: discord.Member):
+    await interaction.response.send_message(
+        f"📊 | نقاط {member.mention}: {points.get(str(member.id), 0)}"
+    )
+
+@bot.tree.command(name="اعطاء_نقاط")
+@app_commands.describe(member="العضو", amount="عدد النقاط")
+async def give_points(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message("❌ | ليس لديك صلاحية", ephemeral=True)
+
+    if amount <= 0:
+        return await interaction.response.send_message("❌ | رقم غير صحيح", ephemeral=True)
+
+    points[str(member.id)] = points.get(str(member.id), 0) + amount
+    save_points()
+
+    await interaction.response.send_message(f"🎁 تم إعطاء {amount} نقطة لـ {member.mention}")
+
+@bot.tree.command(name="سحب_نقاط")
+@app_commands.describe(member="العضو", amount="عدد النقاط")
+async def remove_points(interaction: discord.Interaction, member: discord.Member, amount: int):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message("❌ | ليس لديك صلاحية", ephemeral=True)
+
+    current = points.get(str(member.id), 0)
+
+    if amount <= 0 or current < amount:
+        return await interaction.response.send_message("❌ | رقم غير صحيح", ephemeral=True)
+
+    points[str(member.id)] = current - amount
+    save_points()
+
+    await interaction.response.send_message(f"🗑️ تم سحب {amount} نقطة من {member.mention}")
+
+@bot.tree.command(name="صفر")
+@app_commands.describe(member="العضو")
+async def reset_user(interaction: discord.Interaction, member: discord.Member):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message("❌ | ليس لديك صلاحية", ephemeral=True)
+
+    points[str(member.id)] = 0
+    save_points()
+
+    await interaction.response.send_message(f"🧹 تم تصفير {member.mention}")
+
+@bot.tree.command(name="تصفير")
+async def reset_all(interaction: discord.Interaction):
+    if not is_admin(interaction.user):
+        return await interaction.response.send_message("❌ | ليس لديك صلاحية", ephemeral=True)
+
+    points.clear()
+    save_points()
+
+    await interaction.response.send_message("🧹 تم تصفير الجميع")
+
+# ======================
+# نظام الحضور الصوتي
+# ======================
+
+@bot.event
+async def on_message(message):
+    try:
+        if message.author.bot:
+            return
+
+        if message.channel.id != LOGIN_CHANNEL:
+            return
+
+        member = message.author
+
+        # تسجيل دخول
+        if message.content.strip() == "تسجيل دخول":
+
+            if not member.voice or not member.voice.channel:
+                return await message.reply("❌ لازم تكون داخل روم صوتي")
+
+            if member.id in sessions:
+                return await message.reply("⚠️ انت مسجل بالفعل")
+
+            sessions[member.id] = time.time()
+
+            await message.reply("🟢 تم تسجيل دخولك")
+
+            try:
+                await member.send(
+                    "🟢 تم تسجيل دخولك\n🎧 يتم احتساب الوقت الآن\n⭐ 30 نقطة لكل ساعة"
+                )
+            except:
+                pass
+
+        # تسجيل خروج
+        elif message.content.strip() == "تسجيل خروج":
+
+            if member.id not in sessions:
+                return await message.reply("❌ انت غير مسجل")
+
+            start = sessions[member.id]
+            duration = int(time.time() - start)
+            earned = int((duration / 3600) * 30)
+
+            del sessions[member.id]
+
+            points[str(member.id)] = points.get(str(member.id), 0) + earned
+            save_points()
+
+            await message.reply(
+                f"⏳ الوقت: {format_time(duration)}\n⭐ النقاط: {earned}\n🏆 مجموعك: {points[str(member.id)]}"
+            )
+
+        await bot.process_commands(message)
+
+    except:
+        print(traceback.format_exc())
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if member.bot:
-        return
-    if after.channel and after.channel.id == VOICE_ID:
-        if before.channel is None or before.channel.id != VOICE_ID:
-            staff_ch = bot.get_channel(STAFF_CHANNEL_ID)
-            if staff_ch:
-                await staff_ch.send(f"🚨 <@&{STAFF_ROLE_ID}>، العضو **{member.name}** دخل الانتظار!")
-            vc = discord.utils.get(bot.voice_clients, guild=member.guild)
-            if vc and vc.is_connected():
-                if vc.is_playing():
-                    vc.stop()
-                vc.play(discord.FFmpegPCMAudio(AUDIO_FILE))
+    try:
+        if before.channel == after.channel:
+            return
 
-# ------------------------------------------------------------------------------
-# [5] أنظمة الأوامر (Help & Panel)
-# ------------------------------------------------------------------------------
+        if member.id not in sessions:
+            return
 
-@bot.command(name='مساعدة')
-async def show_panel(ctx):
-    if any(role.id == STAFF_ROLE_ID for role in ctx.author.roles):
-        embed = discord.Embed(
-            title="🛡️ لوحة التحكم الإدارية الكبرى",
-            description="**الصوتي RMOT نظام 4**\n\nاضغط على الأزرار لفتح نوافذ التحكم والإرسال التلقائي للخاص.",
-            color=0x2b2d31
-        )
-        if os.path.exists(PANEL_IMAGE):
-            file = discord.File(PANEL_IMAGE, filename="p.png")
-            embed.set_image(url="attachment://p.png")
-            await ctx.send(file=file, embed=embed, view=ControlPanel())
-        else:
-            await ctx.send(embed=embed, view=ControlPanel())
-    else:
-        await ctx.send("❌ للإدارة فقط!")
+        # خروج
+        if before.channel and not after.channel:
 
-@bot.command(name='هيلب')
-async def manual(ctx):
-    guide = discord.Embed(title="📚 دليل تشغيل بوت RMOT V4", color=0x00ff00)
-    guide.add_field(name="❓ زر التحذير", value="يفتح لك نافذة تطلب منك آيدي العضو والسبب، ثم يرسل له البوت في الخاص مباشرة.", inline=False)
-    guide.add_field(name="❓ زر الإعلان", value="يطلب منك آيدي الرتبة، ويرسل الإعلان لكل أعضاء هذه الرتبة في الخاص تلقائياً.", inline=False)
-    guide.add_field(name="❓ النظام الصوتي", value="البوت يدخل الروم 24/7 ويشغل صوت ترحيبي ويمنشن الإدارة فور دخول عضو.", inline=False)
-    await ctx.send(embed=guide)
+            if member.id in leave_timers:
+                leave_timers[member.id].cancel()
 
-if not TOKEN:
-    raise ValueError("TOKEN not found in environment variables")
+            async def leave_timer():
+                await asyncio.sleep(300)
+
+                if member.id in sessions and (not member.voice or not member.voice.channel):
+
+                    start = sessions[member.id]
+                    duration = int(time.time() - start)
+                    earned = int((duration / 3600) * 30)
+
+                    del sessions[member.id]
+
+                    points[str(member.id)] = points.get(str(member.id), 0) + earned
+                    save_points()
+
+                    try:
+                        await member.send(
+                            f"⏰ انتهت المهلة\n⏳ الوقت: {format_time(duration)}\n⭐ النقاط: {earned}"
+                        )
+                    except:
+                        pass
+
+            leave_timers[member.id] = asyncio.create_task(leave_timer())
+
+            try:
+                await member.send("🚪 خرجت من الصوتي، لديك 5 دقائق للعودة")
+            except:
+                pass
+
+        # رجوع
+        if after.channel:
+            if member.id in leave_timers:
+                leave_timers[member.id].cancel()
+                del leave_timers[member.id]
+
+                try:
+                    await member.send("✅ تم إلغاء المهلة واستمرار تسجيلك")
+                except:
+                    pass
+
+    except:
+        print(traceback.format_exc())
 
 bot.run(TOKEN)
